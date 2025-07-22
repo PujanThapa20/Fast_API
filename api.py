@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from main import WorkCurbScheduler
 import logging
 import uvicorn
-
+import os
 app = FastAPI()
 
 # Configure CORS to allow requests from your frontend
@@ -55,5 +55,4 @@ async def delete_schedule():
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # When running locally, use 127.0.0.1 instead of 0.0.0.0
-    uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("api:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

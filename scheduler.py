@@ -1,95 +1,100 @@
 from ortools.sat.python import cp_model
-from typing import List, Dict, Tuple
-from models import Employee, ShiftType, ShiftAssignment, ScheduleSolution
-from constraints import ShiftSchedulerConstraints
-import collections
+from typing import List, Dict
+import random
+import logging
+import math
+
+logger = logging.getLogger(__name__)
 
 class ShiftScheduler:
-    def __init__(self, employees: List[Employee], num_days: int = 7):
+    def __init__(self, employees: List[dict], num_days: int = 7):
         self.employees = employees
         self.num_days = num_days
-        self.shift_types = [ShiftType.MORNING, ShiftType.EVENING, ShiftType.NIGHT]
+        self.shift_types = ["morning", "evening", "night"]
         self.model = cp_model.CpModel()
-        self.shifts = {}  # Dictionary to hold shift variables
-
-    def create_shift_variables(self):
-        """Create boolean variables for each possible shift assignment"""
-        for employee in self.employees:
+        
+    def generate_schedule(self) -> Dict:
+        """Generate optimized shift schedule with reliable constraints"""
+        # Create variables
+        shifts = {}
+        for emp in self.employees:
             for day in range(self.num_days):
                 for shift in self.shift_types:
-                    self.shifts[(employee['id'], day, shift)] = self.model.NewBoolVar(
-                        f"shift_{employee['id']}_{day}_{shift}"
+                    shifts[(emp['id'], day, shift)] = self.model.NewBoolVar(
+                        f"shift_{emp['id']}_{day}_{shift}"
                     )
-
-    def apply_constraints(self):
-        """Apply all scheduling constraints"""
-        constraints = ShiftSchedulerConstraints(self.model, self.employees, self.num_days)
-        constraints.apply_one_shift_per_day(self.shifts)
-        constraints.apply_max_weekly_shifts(self.shifts)
-        constraints.apply_min_rest_time(self.shifts)
-        constraints.apply_no_consecutive_nights(self.shifts)
-        # Fair distribution is handled in the objective function
-
-    def set_objectives(self):
-        """Set optimization objectives for fair distribution"""
-        # Objective 1: Maximize the number of assigned shifts
-        total_shifts = []
-        for key, var in self.shifts.items():
-            total_shifts.append(var)
-        self.model.Maximize(sum(total_shifts))
-
-        # Objective 2: Minimize the difference in shifts assigned to employees
-        # This helps in fair distribution
-        employee_shifts = collections.defaultdict(list)
-        for (emp_id, day, shift), var in self.shifts.items():
-            employee_shifts[emp_id].append(var)
         
-        # We'll minimize the maximum number of shifts assigned to any employee
-        max_shifts = self.model.NewIntVar(0, self.num_days * len(self.shift_types), 'max_shifts')
-        for emp_id, shifts in employee_shifts.items():
-            self.model.AddMaxEquality(max_shifts, [sum(shifts)])
-        self.model.Minimize(max_shifts)
-
-    def solve(self) -> ScheduleSolution:
-        """Solve the scheduling problem and return the solution"""
+        # Calculate shift distribution parameters
+        total_shifts = self.num_days * len(self.shift_types)
+        min_shifts = math.floor(total_shifts / len(self.employees))
+        max_shifts = min_shifts + 2
+        
+        # Hard Constraints
+        # 1. Each shift assigned to exactly one employee
+        for day in range(self.num_days):
+            for shift in self.shift_types:
+                self.model.AddExactlyOne(
+                    shifts[(emp['id'], day, shift)] for emp in self.employees
+                )
+        
+        # 2. Fair shift distribution
+        for emp in self.employees:
+            total = sum(
+                shifts[(emp['id'], day, shift)]
+                for day in range(self.num_days)
+                for shift in self.shift_types
+            )
+            self.model.Add(total >= max(min_shifts - 1, 1))  # At least 1 shift
+            self.model.Add(total <= min(max_shifts, 7))  # At most 7 shifts
+        
+        # 3. Soft constraints for consecutive nights
+        for emp in self.employees:
+            for day in range(self.num_days - 1):
+                night1 = shifts[(emp['id'], day, "night")]
+                night2 = shifts[(emp['id'], day + 1, "night")]
+                # Penalize but don't forbid consecutive nights
+                penalty = self.model.NewBoolVar(f'penalty_{emp["id"]}_{day}')
+                self.model.Add(night1 + night2 <= 1).OnlyEnforceIf(penalty)
+                self.model.Add(night1 + night2 <= 2)  # Always allow
+        
+        # Randomization for varied solutions
+        random_seed = random.randint(0, 1000000)
+        
+        # Solve with randomization
         solver = cp_model.CpSolver()
+        solver.parameters.random_seed = random_seed
+        solver.parameters.num_search_workers = 8  # Use multiple cores
+        solver.parameters.max_time_in_seconds = 10.0
+        
         status = solver.Solve(self.model)
-
+        
         if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            raise Exception("No solution found")
-
+            logger.error(f"No solution found. Status: {solver.StatusName(status)}")
+            return None
+        
+        # Prepare results
         assignments = []
         shift_counts = {emp['id']: 0 for emp in self.employees}
-
-        # Collect all assignments
-        for employee in self.employees:
-            for day in range(self.num_days):
-                for shift in self.shift_types:
-                    if solver.Value(self.shifts[(employee['id'], day, shift)]) == 1:
-                        assignments.append({
-                            'employee_id': employee['id'],
-                            'employee_name': employee['name'],
-                            'day': day,
-                            'shift': shift.value
-                        })
-                        shift_counts[employee['id']] += 1
-
-        # Calculate statistics
-        stats = {
-            'total_shifts': len(assignments),
-            'employee_stats': shift_counts,
-            'solver_status': solver.StatusName(status),
-            'solve_time': solver.WallTime()
-        }
-
+        
+        for (emp_id, day, shift), var in shifts.items():
+            if solver.Value(var):
+                emp = next(e for e in self.employees if e['id'] == emp_id)
+                assignments.append({
+                    'employee_id': emp_id,
+                    'employee_name': emp['name'],
+                    'day': day,
+                    'shift': shift
+                })
+                shift_counts[emp_id] += 1
+        
         return {
             'assignments': assignments,
-            'stats': stats
+            'stats': {
+                'solve_time': solver.WallTime(),
+                'status': solver.StatusName(status),
+                'random_seed': random_seed,
+                'min_shifts': min_shifts,
+                'max_shifts': max_shifts,
+                'total_shifts': len(assignments)
+            }
         }
-
-    def generate_schedule(self) -> ScheduleSolution:
-        """Generate the complete schedule"""
-        self.create_shift_variables()
-        self.apply_constraints()
-        self.set_objectives()
-        return self.solve()

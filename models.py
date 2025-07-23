@@ -1,5 +1,5 @@
-from typing import List, TypedDict
 from enum import Enum
+from typing import List, TypedDict
 
 class ShiftType(Enum):
     MORNING = "morning"
@@ -14,8 +14,8 @@ class Employee(TypedDict):
 class ShiftAssignment(TypedDict):
     employee_id: str
     employee_name: str
-    day: int  # 0-6 for Monday-Sunday
-    shift: ShiftType
+    day: int  # 0-6 (Monday-Sunday)
+    shift: str  # ShiftType value
 
 class ScheduleSolution(TypedDict):
     assignments: List[ShiftAssignment]
